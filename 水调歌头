@@ -1,0 +1,660 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+local mainMenuVisible = false
+local subMenus = {}
+local activeStates = {}
+local openedSubMenus = {}
+local Camera = workspace:WaitForChild("Camera")
+
+local KILLAURA_CONFIGS = {
+    ["重剑"] = {weapon = "Heavy Sabre", range = 15, delay = 0.10, swing = "Thrust", multiplier = 18},
+    ["军刀"] = {weapon = "Sabre", range = 15, delay = 0.10, swing = "Thrust", multiplier = 18},
+    ["斧头"] = {weapon = "Axe", range = 14, delay = 0.10, swing = "Side", multiplier = 12}
+}
+
+local ELBOW_CONFIGS = {
+    ["工兵斧"] = {weapon = "Axe", range = 14, delay = 0.10},
+    ["卡宾枪"] = {weapon = "Carbine", range = 14, delay = 0.10}
+}
+
+local ESP_CONFIGS = {
+    ["自爆"] = {check = function(obj) return obj:IsA("Model") and obj:FindFirstChild("Torch", true) end, color = Color3.fromRGB(255, 255, 0), alert = true},
+    ["二师兄"] = {check = function(obj) return obj:IsA("Model") and obj.Name == "m_Zombie" and obj:FindFirstChild("Sword", true) end, color = Color3.fromRGB(0, 255, 100), alert = false},
+    ["红眼"] = {check = function(obj) return obj:IsA("Model") and obj:FindFirstChild("E", true) and not obj:FindFirstChild("Sword", true) end, color = Color3.fromRGB(255, 0, 0), alert = false},
+    ["大师兄"] = {check = function(obj) return obj:IsA("Model") and obj:FindFirstChild("Axe", true) end, color = Color3.fromRGB(0, 100, 255), alert = false},
+    ["燃烧者"] = {check = function(obj) return obj:IsA("Model") and obj:FindFirstChild("Whale Oil Lantern", true) end, color = Color3.fromRGB(255, 69, 0), alert = false}
+}
+
+local ANIM_DATA = {
+    {"重剑冲锋", "rbxassetid://17406602570"},
+    {"山伯乐", "rbxassetid://12333490173"}, 
+    {"红眼", "rbxassetid://12581785298"},   
+    {"燃烧者", "rbxassetid://12333490857"},
+    {"躺", "rbxassetid://70406246816136"}    
+}
+
+local currentAnimTrack = nil
+local activeAnimName = nil
+local jumpHookActive = false
+local oldNamecall
+local ALERT_RANGE = 20
+
+local function PowerDrag(obj, target)
+    target = target or obj
+    local dragging, dragStart, startPos, dragInput
+
+    obj.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = target.Position
+            dragInput = input
+        end
+    end)
+
+    obj.InputEnded:Connect(function(input)
+        if input == dragInput then dragging = false end
+    end)
+
+    UIS.InputChanged:Connect(function(input)
+        if dragging and input == dragInput then
+            local delta = input.Position - dragStart
+            target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+
+local function isDangerousCore(obj)
+    if not obj then return false end
+    
+    local current = obj
+    while current and current ~= workspace do
+        if current.Name == "m_Zombie" or current:FindFirstChild("Barrel", true) or current.Parent == workspace:FindFirstChild("Camera") then
+            return true
+        end
+        current = current.Parent
+    end
+    
+    local cam = workspace:FindFirstChild("Camera")
+    if cam then
+        for _, b in pairs(cam:GetChildren()) do
+            if b.Name == "m_Zombie" and b:FindFirstChild("Barrel", true) then
+                local bRoot = b:FindFirstChild("HumanoidRootPart") or b:FindFirstChild("Torso")
+                local objPos = (obj:IsA("BasePart") and obj.Position) or (obj:FindFirstChild("HumanoidRootPart") and obj.HumanoidRootPart.Position)
+                
+                if bRoot and objPos and (bRoot.Position - objPos).Magnitude < 4 then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function getKillauraRemote(weaponName)
+    local pFolder = workspace.Players:FindFirstChild(LocalPlayer.Name)
+    local weapon = pFolder and pFolder:FindFirstChild(weaponName)
+    return weapon and weapon:FindFirstChild("RemoteEvent")
+end
+
+local function findKillauraTarget(range)
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    local myPos = char.HumanoidRootPart.Position
+    
+    local zombiesFolder = workspace:FindFirstChild("Zombies")
+    if not zombiesFolder then return nil end
+    
+    local closest = nil
+    local minDist = range
+    
+    for _, z in pairs(zombiesFolder:GetChildren()) do
+        if z:IsA("Model") and not isDangerousCore(z) then
+            local head = z:FindFirstChild("Head")
+            local root = z:FindFirstChild("HumanoidRootPart") or z:FindFirstChild("Torso")
+            local hum = z:FindFirstChildOfClass("Humanoid")
+            
+            if head and root and hum and hum.Health > 0 then
+                local d = (myPos - root.Position).Magnitude
+                if d < minDist then
+                    closest = z
+                    minDist = d
+                end
+            end
+        end
+    end
+    return closest
+end
+
+local function attackKillaura(target, config, lastTime)
+    if isDangerousCore(target) then return lastTime end
+    
+    local now = tick()
+    if now - lastTime < config.delay then return lastTime end
+    
+    local remote = getKillauraRemote(config.weapon)
+    if not remote then return lastTime end
+    
+    local char = LocalPlayer.Character
+    local head = target:FindFirstChild("Head")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not head or not hrp then return lastTime end
+    
+    local dir = (head.Position - hrp.Position).Unit
+    
+    pcall(function()
+        remote:FireServer("Swing", config.swing)
+        remote:FireServer("HitZombie", target, head.Position, true, dir * config.multiplier, "Head", dir)
+    end)
+    
+    return now
+end
+
+local function getElbowRemote(weaponName)
+    local tool = LocalPlayer.Backpack:FindFirstChild(weaponName) or (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild(weaponName))
+    return tool and tool:FindFirstChild("RemoteEvent")
+end
+
+local function findElbowTarget(range)
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local zombies = workspace:FindFirstChild("Zombies")
+    if not hrp or not zombies then return nil end
+
+    local closest, dist = nil, range
+    for _, z in pairs(zombies:GetChildren()) do
+        if z:IsA("Model") and not z:FindFirstChild("Barrel", true) and z.Name ~= "m_Zombie" then
+            local zHrp = z:FindFirstChild("HumanoidRootPart") or z:FindFirstChild("Torso")
+            local hum = z:FindFirstChildOfClass("Humanoid")
+            if zHrp and hum and hum.Health > 0 then
+                local d = (hrp.Position - zHrp.Position).Magnitude
+                if d < dist then closest = z; dist = d end
+            end
+        end
+    end
+    return closest
+end
+
+local function attackElbow(target, weaponType, lastTime, delay)
+    local now = tick()
+    if now - lastTime < delay then return lastTime end
+    
+    local remote = getElbowRemote(weaponType == "工兵斧" and "Axe" or "Carbine")
+    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local tRoot = target:FindFirstChild("HumanoidRootPart") or target:FindFirstChild("Head")
+    
+    if not remote or not root or not tRoot then return lastTime end
+
+    pcall(function()
+        if weaponType == "工兵斧" then
+            remote:FireServer("Equip", root)
+            remote:FireServer("BraceBlock")
+            remote:FireServer("FeedbackStun", target, tRoot.Position)
+            remote:FireServer("StopBraceBlock")
+        else
+            remote:FireServer("Shove")
+            remote:FireServer("FeedbackStun", target, tRoot.Position)
+        end
+    end)
+    
+    return now
+end
+
+local function playAnimation(name, id)
+    local char = workspace.Players:FindFirstChild(LocalPlayer.Name)
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local animator = hum and hum:FindFirstChildOfClass("Animator")
+    if animator then
+        if currentAnimTrack then currentAnimTrack:Stop(0.1) end
+        local anim = Instance.new("Animation")
+        anim.AnimationId = id
+        currentAnimTrack = animator:LoadAnimation(anim)
+        currentAnimTrack.Priority = Enum.AnimationPriority.Action
+        currentAnimTrack.Looped = true
+        currentAnimTrack:Play()
+        activeAnimName = name
+    end
+end
+
+local sg = Instance.new("ScreenGui", LocalPlayer.PlayerGui)
+sg.ResetOnSpawn = false
+sg.Name = "ShuiDiaoGeTouHub"
+
+local mainBtn = Instance.new("TextButton", sg)
+mainBtn.Size = UDim2.new(0, 45, 0, 45)
+mainBtn.Position = UDim2.new(0.05, 0, 0.4, 0)
+mainBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 35)
+mainBtn.Text = "水"
+mainBtn.TextSize = 20
+mainBtn.TextColor3 = Color3.fromRGB(140, 140, 255)
+mainBtn.Font = Enum.Font.Code
+mainBtn.BorderSizePixel = 0
+local mainCorner = Instance.new("UICorner", mainBtn)
+mainCorner.CornerRadius = UDim.new(0, 4)
+local mainStroke = Instance.new("UIStroke", mainBtn)
+mainStroke.Color = Color3.fromRGB(60, 60, 80)
+mainStroke.Thickness = 1
+PowerDrag(mainBtn)
+
+local mainFrame = Instance.new("Frame", sg)
+mainFrame.Size = UDim2.new(0, 200, 0, 30)
+mainFrame.Position = UDim2.new(0.05, 55, 0.4, 0)
+mainFrame.BackgroundTransparency = 1
+mainFrame.Visible = false
+mainFrame.BorderSizePixel = 0
+
+local header = Instance.new("TextButton", mainFrame)
+header.Size = UDim2.new(1, 0, 0, 28)
+header.BackgroundColor3 = Color3.fromRGB(28, 28, 35)
+header.Text = "水调歌头"
+header.Font = Enum.Font.Code
+header.TextSize = 16
+header.TextColor3 = Color3.fromRGB(200, 200, 220)
+header.BorderSizePixel = 0
+header.AutoButtonColor = false
+local headerCorner = Instance.new("UICorner", header)
+headerCorner.CornerRadius = UDim.new(0, 4)
+local headerStroke = Instance.new("UIStroke", header)
+headerStroke.Color = Color3.fromRGB(60, 60, 80)
+headerStroke.Thickness = 1
+PowerDrag(header, mainFrame)
+
+local contentFrame = Instance.new("Frame", mainFrame)
+contentFrame.Size = UDim2.new(1, 0, 0, 212)
+contentFrame.Position = UDim2.new(0, 0, 0, 29)
+contentFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+contentFrame.BorderSizePixel = 0
+local contentCorner = Instance.new("UICorner", contentFrame)
+contentCorner.CornerRadius = UDim.new(0, 4)
+local contentStroke = Instance.new("UIStroke", contentFrame)
+contentStroke.Color = Color3.fromRGB(60, 60, 80)
+contentStroke.Thickness = 1
+
+local layout = Instance.new("UIListLayout", contentFrame)
+layout.Padding = UDim.new(0, 1)
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+local categories = {
+    {name = "杀戮光环", items = {"重剑", "军刀", "斧头"}},
+    {name = "肘击光环", items = {"工兵斧", "卡宾枪"}},
+    {name = "僵尸透视", items = {"自爆", "二师兄", "红眼", "大师兄", "燃烧者"}},
+    {name = "动画包", items = ANIM_DATA},
+    {name = "挥刀跳", items = {}}
+}
+
+local alertFrame = Instance.new("Frame", sg)
+alertFrame.Size = UDim2.new(0, 180, 0, 50)
+alertFrame.Position = UDim2.new(1, -200, 1, -70)
+alertFrame.BackgroundColor3 = Color3.fromRGB(60, 40, 20)
+alertFrame.Visible = false
+local alertCorner = Instance.new("UICorner", alertFrame)
+alertCorner.CornerRadius = UDim.new(0, 4)
+local alertStroke = Instance.new("UIStroke", alertFrame)
+alertStroke.Color = Color3.fromRGB(255, 200, 0)
+alertStroke.Thickness = 2
+
+local alertText = Instance.new("TextLabel", alertFrame)
+alertText.Size = UDim2.new(1, 0, 1, 0)
+alertText.BackgroundTransparency = 1
+alertText.Text = "⚠️ 自爆靠近! ⚠️"
+alertText.TextColor3 = Color3.fromRGB(255, 220, 100)
+alertText.TextSize = 18
+alertText.Font = Enum.Font.Code
+
+local function createSubMenu(categoryName, items)
+    local subFrame = Instance.new("Frame", sg)
+    subFrame.Size = UDim2.new(0, 200, 0, 28)
+    subFrame.Position = UDim2.new(0.05, 265, 0.4, 0)
+    subFrame.BackgroundTransparency = 1
+    subFrame.Visible = false
+    subFrame.BorderSizePixel = 0
+    
+    local subHeader = Instance.new("TextButton", subFrame)
+    subHeader.Size = UDim2.new(1, 0, 0, 28)
+    subHeader.BackgroundColor3 = Color3.fromRGB(28, 28, 35)
+    subHeader.Text = categoryName
+    subHeader.Font = Enum.Font.Code
+    subHeader.TextSize = 16
+    subHeader.TextColor3 = Color3.fromRGB(200, 200, 220)
+    subHeader.BorderSizePixel = 0
+    subHeader.AutoButtonColor = false
+    local subHeaderCorner = Instance.new("UICorner", subHeader)
+    subHeaderCorner.CornerRadius = UDim.new(0, 4)
+    local subHeaderStroke = Instance.new("UIStroke", subHeader)
+    subHeaderStroke.Color = Color3.fromRGB(60, 60, 80)
+    subHeaderStroke.Thickness = 1
+    PowerDrag(subHeader, subFrame)
+    
+    local itemCount = 0
+    if categoryName == "动画包" then
+        itemCount = #items
+    else
+        itemCount = type(items[1]) == "string" and #items or 0
+    end
+    
+    local extraHeight = 0
+    if categoryName == "僵尸透视" then
+        extraHeight = 33
+    end
+    
+    local subContent = Instance.new("Frame", subFrame)
+    subContent.Size = UDim2.new(1, 0, 0, itemCount * 33 + 30 + extraHeight)
+    subContent.Position = UDim2.new(0, 0, 0, 29)
+    subContent.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    subContent.BorderSizePixel = 0
+    local subContentCorner = Instance.new("UICorner", subContent)
+    subContentCorner.CornerRadius = UDim.new(0, 4)
+    local subContentStroke = Instance.new("UIStroke", subContent)
+    subContentStroke.Color = Color3.fromRGB(60, 60, 80)
+    subContentStroke.Thickness = 1
+    
+    local subLayout = Instance.new("UIListLayout", subContent)
+    subLayout.Padding = UDim.new(0, 1)
+    subLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    
+    if categoryName == "动画包" then
+        for _, data in ipairs(items) do
+            local itemName = data[1]
+            local itemBtn = Instance.new("TextButton", subContent)
+            itemBtn.Size = UDim2.new(1, -6, 0, 32)
+            itemBtn.Text = itemName
+            itemBtn.Font = Enum.Font.Code
+            itemBtn.TextSize = 16
+            itemBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+            itemBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
+            itemBtn.BorderSizePixel = 0
+            local itemCorner = Instance.new("UICorner", itemBtn)
+            itemCorner.CornerRadius = UDim.new(0, 3)
+            
+            itemBtn.MouseButton1Click:Connect(function()
+                if activeAnimName == itemName then
+                    if currentAnimTrack then currentAnimTrack:Stop(0.1) end
+                    activeAnimName = nil
+                    itemBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+                    itemBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
+                else
+                    playAnimation(itemName, data[2])
+                    for _, child in pairs(subContent:GetChildren()) do
+                        if child:IsA("TextButton") and child ~= itemBtn then 
+                            child.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+                            child.TextColor3 = Color3.fromRGB(180, 180, 200)
+                        end
+                    end
+                    itemBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 140)
+                    itemBtn.TextColor3 = Color3.fromRGB(220, 220, 255)
+                end
+            end)
+        end
+    else
+        for _, itemName in ipairs(items) do
+            local itemBtn = Instance.new("TextButton", subContent)
+            itemBtn.Size = UDim2.new(1, -6, 0, 32)
+            itemBtn.Text = itemName
+            itemBtn.Font = Enum.Font.Code
+            itemBtn.TextSize = 16
+            itemBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+            itemBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
+            itemBtn.BorderSizePixel = 0
+            local itemCorner = Instance.new("UICorner", itemBtn)
+            itemCorner.CornerRadius = UDim.new(0, 3)
+            
+            itemBtn.MouseButton1Click:Connect(function()
+                local isActive = itemBtn.BackgroundColor3 == Color3.fromRGB(80, 80, 140)
+                itemBtn.BackgroundColor3 = isActive and Color3.fromRGB(35, 35, 45) or Color3.fromRGB(80, 80, 140)
+                itemBtn.TextColor3 = isActive and Color3.fromRGB(180, 180, 200) or Color3.fromRGB(220, 220, 255)
+                
+                local stateKey = categoryName .. "_" .. itemName
+                activeStates[stateKey] = not isActive
+            end)
+        end
+        
+        if categoryName == "僵尸透视" then
+            local alertCheckbox = Instance.new("TextButton", subContent)
+            alertCheckbox.Size = UDim2.new(1, -6, 0, 32)
+            alertCheckbox.Text = "自爆弹窗: OFF"
+            alertCheckbox.Font = Enum.Font.Code
+            alertCheckbox.TextSize = 16
+            alertCheckbox.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+            alertCheckbox.TextColor3 = Color3.fromRGB(180, 180, 200)
+            alertCheckbox.BorderSizePixel = 0
+            local alertCbCorner = Instance.new("UICorner", alertCheckbox)
+            alertCbCorner.CornerRadius = UDim.new(0, 3)
+            
+            alertCheckbox.MouseButton1Click:Connect(function()
+                activeStates["自爆提醒"] = not activeStates["自爆提醒"]
+                alertCheckbox.Text = "自爆弹窗: " .. (activeStates["自爆提醒"] and "ON" or "OFF")
+                alertCheckbox.BackgroundColor3 = activeStates["自爆提醒"] and Color3.fromRGB(80, 80, 140) or Color3.fromRGB(35, 35, 45)
+                alertCheckbox.TextColor3 = activeStates["自爆提醒"] and Color3.fromRGB(220, 220, 255) or Color3.fromRGB(180, 180, 200)
+            end)
+        end
+    end
+    
+    local authorLabel = Instance.new("TextLabel", subContent)
+    authorLabel.Size = UDim2.new(1, -6, 0, 28)
+    authorLabel.Text = "作者Trackmaker"
+    authorLabel.Font = Enum.Font.Code
+    authorLabel.TextSize = 14
+    authorLabel.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    authorLabel.TextColor3 = Color3.fromRGB(120, 120, 140)
+    authorLabel.BorderSizePixel = 0
+    local authorCorner = Instance.new("UICorner", authorLabel)
+    authorCorner.CornerRadius = UDim.new(0, 3)
+    
+    return subFrame
+end
+
+for _, category in ipairs(categories) do
+    local catBtn = Instance.new("TextButton", contentFrame)
+    catBtn.Size = UDim2.new(1, -6, 0, 41)
+    catBtn.Text = category.name
+    catBtn.Font = Enum.Font.Code
+    catBtn.TextSize = 16
+    catBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    catBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
+    catBtn.BorderSizePixel = 0
+    local catCorner = Instance.new("UICorner", catBtn)
+    catCorner.CornerRadius = UDim.new(0, 3)
+    
+    if #category.items > 0 then
+        local subMenu = createSubMenu(category.name, category.items)
+        subMenus[category.name] = subMenu
+        
+        catBtn.MouseButton1Click:Connect(function()
+            local isCurrentlyOpen = openedSubMenus[category.name]
+            
+            if isCurrentlyOpen then
+                subMenu.Visible = false
+                openedSubMenus[category.name] = false
+            else
+                subMenu.Visible = true
+                openedSubMenus[category.name] = true
+            end
+        end)
+    else
+        catBtn.MouseButton1Click:Connect(function()
+            local isActive = catBtn.BackgroundColor3 == Color3.fromRGB(80, 80, 140)
+            catBtn.BackgroundColor3 = isActive and Color3.fromRGB(35, 35, 45) or Color3.fromRGB(80, 80, 140)
+            catBtn.TextColor3 = isActive and Color3.fromRGB(180, 180, 200) or Color3.fromRGB(220, 220, 255)
+            
+            activeStates[category.name] = not isActive
+        end)
+    end
+end
+
+mainBtn.MouseButton1Click:Connect(function()
+    mainMenuVisible = not mainMenuVisible
+    mainFrame.Visible = mainMenuVisible
+    
+    for categoryName, isOpen in pairs(openedSubMenus) do
+        if subMenus[categoryName] then
+            subMenus[categoryName].Visible = mainMenuVisible and isOpen
+        end
+    end
+end)
+
+local lastAttackTimes = {}
+local espHighlights = {}
+
+local function clearESPHighlights()
+    for _, hl in pairs(espHighlights) do
+        if hl then hl:Destroy() end
+    end
+    espHighlights = {}
+end
+
+local function createESP(model, color, label)
+    if espHighlights[model] then return end
+    
+    local torso = model:FindFirstChild("Torso") or model:FindFirstChild("HumanoidRootPart")
+    if not torso then return end
+    
+    local hl = Instance.new("Highlight")
+    hl.FillColor = color
+    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+    hl.FillTransparency = 0.4
+    hl.OutlineTransparency = 0
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Adornee = model
+    hl.Parent = model
+    
+    local bgui = Instance.new("BillboardGui", torso)
+    bgui.Size = UDim2.new(0, 100, 0, 40)
+    bgui.AlwaysOnTop = true
+    bgui.StudsOffset = Vector3.new(0, 3, 0)
+    
+    local tl = Instance.new("TextLabel", bgui)
+    tl.BackgroundTransparency = 1
+    tl.Size = UDim2.new(1, 0, 1, 0)
+    tl.Text = label
+    tl.TextColor3 = Color3.new(1, 1, 1)
+    tl.TextStrokeColor3 = color
+    tl.TextStrokeTransparency = 0
+    tl.TextSize = 20
+    tl.Font = Enum.Font.GothamBold
+    
+    espHighlights[model] = {hl = hl, gui = bgui}
+end
+
+RunService.Heartbeat:Connect(function()
+    for weaponName, config in pairs(KILLAURA_CONFIGS) do
+        local stateKey = "杀戮光环_" .. weaponName
+        if activeStates[stateKey] then
+            local target = findKillauraTarget(config.range)
+            if target then
+                lastAttackTimes[weaponName] = attackKillaura(target, config, lastAttackTimes[weaponName] or 0)
+            end
+        end
+    end
+    
+    for weaponType, config in pairs(ELBOW_CONFIGS) do
+        local stateKey = "肘击光环_" .. weaponType
+        if activeStates[stateKey] then
+            local target = findElbowTarget(config.range)
+            if target then
+                lastAttackTimes[weaponType] = attackElbow(target, weaponType, lastAttackTimes[weaponType] or 0, config.delay)
+            end
+        end
+    end
+    
+    local anyESPActive = false
+    for espName, _ in pairs(ESP_CONFIGS) do
+        if activeStates["僵尸透视_" .. espName] then
+            anyESPActive = true
+            break
+        end
+    end
+    
+    if anyESPActive then
+        for model, data in pairs(espHighlights) do
+            if not model:IsDescendantOf(workspace) then
+                if data.hl then data.hl:Destroy() end
+                if data.gui then data.gui:Destroy() end
+                espHighlights[model] = nil
+            end
+        end
+        
+        local currentTargets = {}
+        local anyNear = false
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        
+        for _, obj in ipairs(Camera:GetChildren()) do
+            for espName, espConfig in pairs(ESP_CONFIGS) do
+                if activeStates["僵尸透视_" .. espName] and espConfig.check(obj) then
+                    currentTargets[obj] = true
+                    createESP(obj, espConfig.color, espName)
+                    
+                    if espConfig.alert and activeStates["自爆提醒"] and root then
+                        local tTorso = obj:FindFirstChild("Torso") or obj:FindFirstChild("HumanoidRootPart")
+                        if tTorso and (root.Position - tTorso.Position).Magnitude <= ALERT_RANGE then
+                            anyNear = true
+                        end
+                    end
+                end
+            end
+        end
+        
+        alertFrame.Visible = anyNear
+        
+        for model, data in pairs(espHighlights) do
+            if not currentTargets[model] then
+                if data.hl then data.hl:Destroy() end
+                if data.gui then data.gui:Destroy() end
+                espHighlights[model] = nil
+            end
+        end
+    else
+        clearESPHighlights()
+        alertFrame.Visible = false
+    end
+end)
+
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+
+    if activeStates["挥刀跳"] and method == "FireServer" then
+        if args[1] == "Swing" and args[2] == "Thrust" then
+            task.defer(function()
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    hum.Jump = true
+                end
+            end)
+        end
+    end
+
+    return oldNamecall(self, ...)
+end)
+
+workspace:WaitForChild("Players").ChildAdded:Connect(function(child)
+    if child.Name == LocalPlayer.Name then
+        task.wait(2)
+        if activeAnimName then
+            for _, data in ipairs(ANIM_DATA) do
+                if data[1] == activeAnimName then 
+                    playAnimation(data[1], data[2]) 
+                    break 
+                end
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(3)
+        if activeAnimName and (not currentAnimTrack or not currentAnimTrack.IsPlaying) then
+            for _, data in ipairs(ANIM_DATA) do
+                if data[1] == activeAnimName then 
+                    playAnimation(data[1], data[2]) 
+                    break 
+                end
+            end
+        end
+    end
+end)
